@@ -64,10 +64,6 @@ function hasHeaderInjection(value: string): boolean {
   return /[\r\n]/.test(value);
 }
 
-function isValidFromEmail(value: string): boolean {
-  return !hasHeaderInjection(value) && /^.+<[^<>\s@]+@[^<>\s@]+\.[^<>\s@]+>$/.test(value);
-}
-
 function escapeHtml(value: string): string {
   return value
     .replace(/&/g, '&amp;')
@@ -83,27 +79,6 @@ function isPayload(value: unknown): value is ContactPayload {
 
 function getMissingEnv(env: Env): string[] {
   return ['RESEND_API_KEY', 'CONTACT_EMAIL', 'FROM_EMAIL'].filter((key) => !env[key as keyof Env]);
-}
-
-function hasEnv(env: Env): env is Required<Env> {
-  const missing = getMissingEnv(env);
-
-  if (missing.length) {
-    console.error('contact_api_missing_env', { missing });
-    return false;
-  }
-
-  if (!isValidEmail(env.CONTACT_EMAIL || '') || hasHeaderInjection(env.CONTACT_EMAIL || '')) {
-    console.error('contact_api_invalid_contact_email');
-    return false;
-  }
-
-  if (!isValidFromEmail(env.FROM_EMAIL || '')) {
-    console.error('contact_api_invalid_from_email');
-    return false;
-  }
-
-  return true;
 }
 
 function validate(payload: ContactPayload): { data?: ContactData; message?: string } {
@@ -230,28 +205,31 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return json({ success: false, ok: false, message: validation.message || 'Invalid request.' }, 400);
   }
 
-  if (!hasEnv(env)) {
+  const missing = getMissingEnv(env);
+  if (missing.length > 0) {
+    console.error('contact_api_missing_env', { missing });
     return json(
-      { success: false, ok: false, message: 'Email service is not configured.', missing: getMissingEnv(env) },
+      { success: false, ok: false, message: 'Email service is not configured.', missing },
       500
     );
   }
+  const configuredEnv = env as Required<Env>;
 
-  const resend = new Resend(env.RESEND_API_KEY);
+  const resend = new Resend(configuredEnv.RESEND_API_KEY);
   const { date, time } = formatDateTime();
   const data = validation.data;
 
   try {
     await sendEmail(resend, {
-      from: env.FROM_EMAIL,
-      to: env.CONTACT_EMAIL,
+      from: configuredEnv.FROM_EMAIL,
+      to: configuredEnv.CONTACT_EMAIL,
       replyTo: data.email,
       subject: `BELNEX ENERGY quote request - ${data.service}`,
       html: leadEmailHtml(data, date, time),
     });
 
     await sendEmail(resend, {
-      from: env.FROM_EMAIL,
+      from: configuredEnv.FROM_EMAIL,
       to: data.email,
       subject: 'Thank you for contacting BELNEX ENERGY',
       html: confirmationEmailHtml(data.name),
