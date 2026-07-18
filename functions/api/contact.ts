@@ -44,6 +44,8 @@ function json(
     success: boolean;
     message: string;
     ok?: boolean;
+    turnstileErrors?: string[];
+    hostname?: string | null;
   },
   status = 200,
   headers: Record<string, string> = {}
@@ -84,13 +86,22 @@ function isPayload(value: unknown): value is ContactPayload {
 }
 
 type EmailEnv = Required<Pick<Env, 'RESEND_API_KEY' | 'CONTACT_EMAIL' | 'FROM_EMAIL'>>;
+type TurnstileVerificationResult = {
+  success?: boolean;
+  'error-codes'?: string[];
+  hostname?: string;
+};
 
 function hasRequiredEmailEnv(env: Env): env is Env & EmailEnv {
   return Boolean(env.RESEND_API_KEY && env.CONTACT_EMAIL && env.FROM_EMAIL);
 }
 
-async function verifyTurnstile(token: string, secret: string, remoteIp: string | null): Promise<boolean> {
-  if (!token) return false;
+async function verifyTurnstile(
+  token: string,
+  secret: string,
+  remoteIp: string | null
+): Promise<TurnstileVerificationResult> {
+  if (!token) return { success: false, 'error-codes': [] };
 
   const body = new FormData();
   body.append('secret', secret);
@@ -102,11 +113,11 @@ async function verifyTurnstile(token: string, secret: string, remoteIp: string |
       method: 'POST',
       body,
     });
-    const result = (await response.json()) as { success?: boolean };
+    const result = (await response.json()) as TurnstileVerificationResult;
 
-    return response.ok && result.success === true;
+    return response.ok ? result : { ...result, success: false };
   } catch {
-    return false;
+    return { success: false, 'error-codes': [] };
   }
 }
 
@@ -231,14 +242,23 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     return json({ success: false, ok: false, message: 'Security service is not configured.' }, 500);
   }
 
-  const turnstileVerified = await verifyTurnstile(
+  const verificationResult = await verifyTurnstile(
     clean(payload.turnstileToken),
     env.TURNSTILE_SECRET_KEY,
     request.headers.get('CF-Connecting-IP')
   );
 
-  if (!turnstileVerified) {
-    return json({ success: false, ok: false, message: 'Security verification failed.' }, 400);
+  if (verificationResult.success !== true) {
+    return json(
+      {
+        success: false,
+        ok: false,
+        message: 'Security verification failed.',
+        turnstileErrors: verificationResult['error-codes'] ?? [],
+        hostname: verificationResult.hostname ?? null,
+      },
+      400
+    );
   }
 
   const validation = validate(payload);
