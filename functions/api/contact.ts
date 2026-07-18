@@ -38,7 +38,16 @@ const LIMITS = {
 } as const;
 
 function json(
-  body: { success: boolean; message: string; ok?: boolean; missing?: string[] },
+  body: {
+    success: boolean;
+    message: string;
+    ok?: boolean;
+    missing?: string[];
+    provider?: string;
+    error?: string;
+    code?: string;
+    statusCode?: number;
+  },
   status = 200,
   headers: Record<string, string> = {}
 ): Response {
@@ -168,11 +177,48 @@ function confirmationEmailHtml(name: string): string {
   `;
 }
 
+class ResendSendError extends Error {
+  code?: string;
+  statusCode?: number;
+
+  constructor(message: string, code?: string, statusCode?: number) {
+    super(message);
+    this.name = 'ResendSendError';
+    this.code = code;
+    this.statusCode = statusCode;
+  }
+}
+
+function getSafeResendError(error: unknown): { error: string; code?: string; statusCode?: number } {
+  if (error instanceof ResendSendError) {
+    return {
+      error: error.message,
+      code: error.code,
+      statusCode: error.statusCode,
+    };
+  }
+
+  if (error instanceof Error) {
+    return { error: error.message };
+  }
+
+  return { error: 'unknown' };
+}
+
 async function sendEmail(resend: Resend, payload: Parameters<Resend['emails']['send']>[0]): Promise<void> {
   const response = await resend.emails.send(payload);
 
   if (response.error) {
-    throw new Error(response.error.name || 'resend_error');
+    const statusCode =
+      'statusCode' in response.error && typeof response.error.statusCode === 'number'
+        ? response.error.statusCode
+        : undefined;
+
+    throw new ResendSendError(
+      response.error.message || response.error.name || 'resend_error',
+      response.error.name,
+      statusCode
+    );
   }
 }
 
@@ -235,10 +281,18 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
       html: confirmationEmailHtml(data.name),
     });
   } catch (error) {
-    console.error('contact_api_resend_failure', {
-      error: error instanceof Error ? error.message : 'unknown',
-    });
-    return json({ success: false, ok: false, message: 'Unable to send email. Please try again later.' }, 502);
+    const safeError = getSafeResendError(error);
+    console.error('contact_api_resend_failure', safeError);
+    return json(
+      {
+        success: false,
+        ok: false,
+        message: 'Unable to send email. Please try again later.',
+        provider: 'resend',
+        ...safeError,
+      },
+      502
+    );
   }
 
   return json({ success: true, ok: true, message: 'Thank you. Your request was sent successfully.' });
